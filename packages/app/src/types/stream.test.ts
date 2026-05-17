@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import invariant from "tiny-invariant";
 import { describe, it } from "vitest";
 
 import {
@@ -325,14 +326,14 @@ describe("stream reducer canonical tool calls", () => {
       },
     ]);
 
-    assert.deepStrictEqual(
-      state.map((item) => (item.kind === "assistant_message" ? item.text : item.kind)),
-      ["First answer.", "Second answer."],
-    );
-    assert.deepStrictEqual(
-      state.map((item) => (item.kind === "assistant_message" ? item.messageId : null)),
-      ["msg-first", "msg-second"],
-    );
+    const messages = state.filter((item) => item.kind === "assistant_message");
+    assert.strictEqual(messages.length, 2);
+    const first = messages[0];
+    const second = messages[1];
+    invariant(first?.kind === "assistant_message");
+    invariant(second?.kind === "assistant_message");
+    assert.deepStrictEqual([first.text, second.text], ["First answer.", "Second answer."]);
+    assert.deepStrictEqual([first.messageId, second.messageId], ["msg-first", "msg-second"]);
   });
 
   it("merges adjacent assistant deltas when message ids match", () => {
@@ -347,13 +348,13 @@ describe("stream reducer canonical tool calls", () => {
       },
     ]);
 
-    assert.strictEqual(state.length, 1);
-    assert.strictEqual(state[0]?.kind, "assistant_message");
-    if (state[0]?.kind === "assistant_message") {
-      assert.strictEqual(state[0].text, "Hello");
-      assert.strictEqual(state[0].id, "msg-same");
-      assert.strictEqual(state[0].messageId, "msg-same");
-    }
+    const messages = state.filter((item) => item.kind === "assistant_message");
+    assert.strictEqual(messages.length, 1);
+    const first = messages[0];
+    invariant(first?.kind === "assistant_message");
+    assert.strictEqual(first.text, "Hello");
+    assert.strictEqual(first.id, "msg-same");
+    assert.strictEqual(first.messageId, "msg-same");
   });
 
   it("preserves old assistant merge behavior when message ids are absent", () => {
@@ -368,8 +369,11 @@ describe("stream reducer canonical tool calls", () => {
       },
     ]);
 
-    assert.strictEqual(state.length, 1);
-    assert.strictEqual(state[0]?.kind === "assistant_message" ? state[0].text : null, "Hello");
+    const messages = state.filter((item) => item.kind === "assistant_message");
+    assert.strictEqual(messages.length, 1);
+    const first = messages[0];
+    invariant(first?.kind === "assistant_message");
+    assert.strictEqual(first.text, "Hello");
   });
 
   it("merges running and completed events by callId", () => {
@@ -833,6 +837,102 @@ describe("stream reducer canonical tool calls", () => {
     assert.strictEqual(
       next[0]?.kind === "assistant_message" ? next[0].text : null,
       "Saved that preference. Right. And it probably isn't.",
+    );
+  });
+});
+
+describe("turn lifecycle events", () => {
+  it("finalizes active stream items without adding timeline rows", () => {
+    const startedAt = new Date("2025-01-01T12:00:00Z");
+    const completedAt = new Date("2025-01-01T12:00:05Z");
+
+    let state = reduceStreamUpdate([], { type: "turn_started", provider: "claude" }, startedAt);
+    state = reduceStreamUpdate(
+      state,
+      { type: "timeline", provider: "claude", item: { type: "assistant_message", text: "ok" } },
+      new Date("2025-01-01T12:00:02Z"),
+    );
+    state = reduceStreamUpdate(state, { type: "turn_completed", provider: "claude" }, completedAt);
+
+    assert.deepStrictEqual(
+      state.map((item) => item.kind),
+      ["assistant_message"],
+    );
+  });
+
+  it("hydrates canonical timeline rows without synthetic turn rows", () => {
+    const state = hydrateStreamState([
+      {
+        event: {
+          type: "timeline",
+          provider: "claude",
+          item: { type: "user_message", text: "hi" },
+        },
+        timestamp: new Date("2025-01-01T13:00:00Z"),
+      },
+      {
+        event: assistantTimeline("Working on it.", "claude", "msg-1"),
+        timestamp: new Date("2025-01-01T13:00:01Z"),
+      },
+      {
+        event: assistantTimeline("Done.", "claude", "msg-2"),
+        timestamp: new Date("2025-01-01T13:00:04Z"),
+      },
+    ]);
+
+    assert.deepStrictEqual(
+      state.map((item) => item.kind),
+      ["user_message", "assistant_message", "assistant_message"],
+    );
+  });
+
+  it("does not materialize turn_started events during hydration", () => {
+    const startedAt = new Date("2025-01-01T14:00:00Z");
+    const state = hydrateStreamState([
+      {
+        event: {
+          type: "timeline",
+          provider: "claude",
+          item: { type: "user_message", text: "hi" },
+        },
+        timestamp: new Date("2025-01-01T13:59:59Z"),
+      },
+      { event: { type: "turn_started", provider: "claude" }, timestamp: startedAt },
+      {
+        event: assistantTimeline("ok", "claude", "msg-1"),
+        timestamp: new Date("2025-01-01T14:00:02Z"),
+      },
+    ]);
+
+    assert.deepStrictEqual(
+      state.map((item) => item.kind),
+      ["user_message", "assistant_message"],
+    );
+  });
+
+  it("keeps adjacent user messages as adjacent timeline rows", () => {
+    const state = hydrateStreamState([
+      {
+        event: {
+          type: "timeline",
+          provider: "claude",
+          item: { type: "user_message", text: "hi" },
+        },
+        timestamp: new Date("2025-01-01T15:00:00Z"),
+      },
+      {
+        event: {
+          type: "timeline",
+          provider: "claude",
+          item: { type: "user_message", text: "still there?" },
+        },
+        timestamp: new Date("2025-01-01T15:01:00Z"),
+      },
+    ]);
+
+    assert.deepStrictEqual(
+      state.map((item) => item.kind),
+      ["user_message", "user_message"],
     );
   });
 });

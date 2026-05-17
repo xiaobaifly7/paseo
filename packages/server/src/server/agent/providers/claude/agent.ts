@@ -41,6 +41,7 @@ import {
 import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../provider-runner.js";
 import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
+import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
 
 import {
   getAgentStreamEventTurnId,
@@ -183,6 +184,11 @@ interface AsyncMessageInput<T> {
   push: (item: T) => void;
   end: () => void;
   iterable: AsyncIterable<T>;
+}
+
+interface PersistedTimelineEntry {
+  item: AgentTimelineItem;
+  timestamp?: string;
 }
 
 const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
@@ -1548,7 +1554,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly sidechainTracker = new ClaudeSidechainTracker({
     getToolInput: (toolUseId) => this.toolUseCache.get(toolUseId)?.input ?? null,
   });
-  private persistedHistory: AgentTimelineItem[] = [];
+  private persistedHistory: PersistedTimelineEntry[] = [];
   private historyPending = false;
   private turnState: TurnState = "idle";
   private nextTurnOrdinal = 1;
@@ -1756,8 +1762,13 @@ class ClaudeAgentSession implements AgentSession {
     const history = this.persistedHistory;
     this.persistedHistory = [];
     this.historyPending = false;
-    for (const item of history) {
-      yield { type: "timeline", item, provider: "claude" };
+    for (const entry of history) {
+      yield {
+        type: "timeline",
+        item: entry.item,
+        provider: "claude",
+        timestamp: entry.timestamp,
+      };
     }
   }
 
@@ -2142,9 +2153,9 @@ class ClaudeAgentSession implements AgentSession {
       pushUnique(historyIds[idx]);
     }
     for (let idx = this.persistedHistory.length - 1; idx >= 0; idx -= 1) {
-      const item = this.persistedHistory[idx];
-      if (item?.type === "user_message") {
-        pushUnique(item.messageId);
+      const entry = this.persistedHistory[idx];
+      if (entry?.item.type === "user_message") {
+        pushUnique(entry.item.messageId);
       }
     }
     for (let idx = this.userMessageIds.length - 1; idx >= 0; idx -= 1) {
@@ -3086,29 +3097,7 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
     if (message.subtype === "task_notification") {
-      // TODO: subagent timelines are best-effort. Subagent task_notifications
-      // arrive without parent_tool_use_id but with tool_use_id pointing at the
-      // parent's Task call, so they slip past the sidechain router and pollute
-      // the parent timeline. Drop them here; eventually thread them into the
-      // parent Task tool call's sub_agent log instead.
-      const taskUseId = message.tool_use_id;
-      const cachedTool = taskUseId ? this.toolUseCache.get(taskUseId) : undefined;
-      if (cachedTool?.name === "Task") {
-        return;
-      }
-      const taskNotificationItem = mapTaskNotificationSystemRecordToToolCall(message);
-      if (taskNotificationItem) {
-        events.push({
-          type: "timeline",
-          item: taskNotificationItem,
-          provider: "claude",
-        });
-      }
-      const usage = readUsageFromTaskNotification(message);
-      if (typeof usage === "number") {
-        this.lastContextWindowUsedTokens = usage;
-        events.push(this.createUsageUpdatedEvent(usage));
-      }
+      this.appendTaskNotificationEvents(message, events);
       return;
     }
     if (message.subtype === "task_progress") {
@@ -3117,6 +3106,35 @@ class ClaudeAgentSession implements AgentSession {
       if (typeof this.lastContextWindowUsedTokens === "number") {
         events.push(this.createUsageUpdatedEvent(this.lastContextWindowUsedTokens));
       }
+    }
+  }
+
+  private appendTaskNotificationEvents(
+    message: Extract<SDKMessage, { type: "system"; subtype: "task_notification" }>,
+    events: AgentStreamEvent[],
+  ): void {
+    // TODO: subagent timelines are best-effort. Subagent task_notifications
+    // arrive without parent_tool_use_id but with tool_use_id pointing at the
+    // parent's Task call, so they slip past the sidechain router and pollute
+    // the parent timeline. Drop them here; eventually thread them into the
+    // parent Task tool call's sub_agent log instead.
+    const taskUseId = message.tool_use_id;
+    const cachedTool = taskUseId ? this.toolUseCache.get(taskUseId) : undefined;
+    if (cachedTool?.name === "Task") {
+      return;
+    }
+    const taskNotificationItem = mapTaskNotificationSystemRecordToToolCall(message);
+    if (taskNotificationItem) {
+      events.push({
+        type: "timeline",
+        item: taskNotificationItem,
+        provider: "claude",
+      });
+    }
+    const usage = readUsageFromTaskNotification(message);
+    if (typeof usage === "number") {
+      this.lastContextWindowUsedTokens = usage;
+      events.push(this.createUsageUpdatedEvent(usage));
     }
   }
 
@@ -3211,6 +3229,24 @@ class ClaudeAgentSession implements AgentSession {
   ): void {
     const usage = this.convertUsage(message, message.modelUsage);
     if (message.subtype === "success") {
+      // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")
+      // run client-side in the Claude CLI with no model turn — output_tokens
+      // is 0 and the user-visible text is carried in `result`. Surface it as
+      // an assistant message so the turn doesn't end silently. Normal turns
+      // have output_tokens > 0 and their text is already in the stream.
+      const resultText = typeof message.result === "string" ? message.result.trim() : "";
+      const outputTokens = message.usage?.output_tokens;
+      if (resultText.length > 0 && outputTokens === 0) {
+        events.push({
+          type: "timeline",
+          provider: "claude",
+          item: {
+            type: "assistant_message",
+            text: resultText,
+            messageId: message.uuid,
+          },
+        });
+      }
       events.push({ type: "turn_completed", provider: "claude", usage });
       return;
     }
@@ -3624,7 +3660,7 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
 
-    const timeline: AgentTimelineItem[] = [];
+    const timeline: PersistedTimelineEntry[] = [];
     for (const line of content.split(/\r?\n/)) {
       this.ingestPersistedHistoryLine(line, timeline);
     }
@@ -3635,7 +3671,7 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
-  private ingestPersistedHistoryLine(line: string, timeline: AgentTimelineItem[]): void {
+  private ingestPersistedHistoryLine(line: string, timeline: PersistedTimelineEntry[]): void {
     const trimmed = line.trim();
     if (!trimmed) {
       return;
@@ -3660,9 +3696,15 @@ class ClaudeAgentSession implements AgentSession {
       this.rememberUserMessageId(entry.uuid);
     }
 
+    const historyTimestamp = normalizeProviderReplayTimestamp(entry.timestamp);
     const items = this.convertHistoryEntry(entry);
     if (items.length > 0) {
-      timeline.push(...items);
+      timeline.push(
+        ...items.map((item) => ({
+          item,
+          timestamp: historyTimestamp ?? undefined,
+        })),
+      );
     }
   }
 

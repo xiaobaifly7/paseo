@@ -874,7 +874,7 @@ describe("Codex app-server provider", () => {
           },
           {
             type: "text",
-            text: "in a worktree, remember to use Claude for the UI",
+            text: "$paseo-implement in a worktree, remember to use Claude for the UI",
             text_elements: [],
           },
         ],
@@ -1370,10 +1370,12 @@ describe("Codex app-server provider", () => {
                     type: "agentMessage",
                     id: "message-history",
                     text: "History loaded.",
+                    timestamp: "2026-05-01T10:00:00.000Z",
                   },
                   {
                     type: "contextCompaction",
                     id: "compact-history",
+                    createdAt: "2026-05-01T10:00:01.000Z",
                   },
                 ],
               },
@@ -1397,6 +1399,7 @@ describe("Codex app-server provider", () => {
       {
         type: "timeline",
         provider: "codex",
+        timestamp: "2026-05-01T10:00:00.000Z",
         item: {
           type: "assistant_message",
           text: "History loaded.",
@@ -1406,9 +1409,72 @@ describe("Codex app-server provider", () => {
       {
         type: "timeline",
         provider: "codex",
+        timestamp: "2026-05-01T10:00:01.000Z",
         item: {
           type: "compaction",
           status: "completed",
+        },
+      },
+    ]);
+  });
+
+  test("uses Codex turn timestamps for timestamp-less persisted history items", async () => {
+    const session = createSession();
+    session.client = {
+      request: vi.fn(async (method: string) => {
+        if (method !== "thread/read") {
+          return {};
+        }
+        return {
+          thread: {
+            turns: [
+              {
+                startedAt: 1_778_832_941,
+                completedAt: 1_778_833_094,
+                items: [
+                  {
+                    type: "userMessage",
+                    id: "user-history",
+                    content: [{ type: "text", text: "Check OpenCode timestamps." }],
+                  },
+                  {
+                    type: "agentMessage",
+                    id: "message-history",
+                    text: "History loaded.",
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }),
+    };
+
+    await asInternals(session).loadPersistedHistory();
+
+    const history: AgentStreamEvent[] = [];
+    for await (const event of session.streamHistory()) {
+      history.push(event);
+    }
+
+    expect(history).toEqual([
+      {
+        type: "timeline",
+        provider: "codex",
+        timestamp: "2026-05-15T08:15:41.000Z",
+        item: {
+          type: "user_message",
+          text: "Check OpenCode timestamps.",
+        },
+      },
+      {
+        type: "timeline",
+        provider: "codex",
+        timestamp: "2026-05-15T08:18:14.000Z",
+        item: {
+          type: "assistant_message",
+          text: "History loaded.",
+          messageId: "message-history",
         },
       },
     ]);

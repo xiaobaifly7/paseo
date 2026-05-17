@@ -71,6 +71,15 @@ export interface AgentSelectOption {
   metadata?: AgentMetadata;
 }
 
+export function normalizeAgentModelDefinition(model: AgentModelDefinition): AgentModelDefinition {
+  const defaultThinkingOptionId =
+    model.defaultThinkingOptionId ?? model.thinkingOptions?.find((option) => option.isDefault)?.id;
+  if (!defaultThinkingOptionId || defaultThinkingOptionId === model.defaultThinkingOptionId) {
+    return model;
+  }
+  return { ...model, defaultThinkingOptionId };
+}
+
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
   status: ProviderStatus;
@@ -337,7 +346,13 @@ export type AgentStreamEvent =
       turnId?: string;
     }
   | { type: "turn_canceled"; provider: AgentProvider; reason: string; turnId?: string }
-  | { type: "timeline"; item: AgentTimelineItem; provider: AgentProvider; turnId?: string }
+  | {
+      type: "timeline";
+      item: AgentTimelineItem;
+      provider: AgentProvider;
+      turnId?: string;
+      timestamp?: string;
+    }
   | {
       type: "permission_requested";
       provider: AgentProvider;

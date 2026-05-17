@@ -721,7 +721,10 @@ export function reduceStreamUpdate(
  * Hydrate stream state from a batch of AgentManager stream events
  */
 export function hydrateStreamState(
-  events: Array<{ event: AgentStreamEventPayload; timestamp: Date }>,
+  events: Array<{
+    event: AgentStreamEventPayload;
+    timestamp: Date;
+  }>,
   options?: { source?: StreamUpdateSource },
 ): StreamItem[] {
   const hydrated = events.reduce<StreamItem[]>((state, { event, timestamp }) => {
@@ -748,6 +751,16 @@ const STREAM_COMPLETION_EVENTS = new Set<AgentStreamEventPayload["type"]>([
   "turn_failed",
   "turn_canceled",
 ]);
+
+function applyCompletionToTail(
+  tail: StreamItem[],
+  event: AgentStreamEventPayload,
+  timestamp: Date,
+  source: StreamUpdateSource,
+): StreamItem[] {
+  const finalized = finalizeActiveThoughts(tail);
+  return reduceStreamUpdate(finalized, event, timestamp, { source });
+}
 
 /**
  * Determine what kind of StreamItem an event would produce
@@ -811,6 +824,28 @@ function getActiveAssistantHeadIndex(head: StreamItem[]): number {
     }
   }
   return -1;
+}
+
+function getTailAssistantToResume(params: {
+  incomingKind: StreamItem["kind"] | null;
+  event: AgentStreamEventPayload;
+  nextHead: StreamItem[];
+  tailAssistant: StreamItem | undefined;
+}): AssistantMessageItem | null {
+  if (params.incomingKind !== "assistant_message" || params.nextHead.length !== 0) {
+    return null;
+  }
+  if (params.tailAssistant?.kind !== "assistant_message") {
+    return null;
+  }
+  const incomingMessageId =
+    params.event.type === "timeline" && params.event.item.type === "assistant_message"
+      ? params.event.item.messageId
+      : undefined;
+  if (incomingMessageId !== undefined && params.tailAssistant.messageId !== incomingMessageId) {
+    return null;
+  }
+  return params.tailAssistant;
 }
 
 function promoteCompletedAssistantBlocks(params: { tail: StreamItem[]; head: StreamItem[] }): {
@@ -986,8 +1021,7 @@ export function applyStreamEvent(params: {
   // Handle turn completion events - flush everything
   if (STREAM_COMPLETION_EVENTS.has(event.type)) {
     flushHead();
-    // Also finalize any remaining thoughts in tail
-    const finalized = finalizeActiveThoughts(nextTail);
+    const finalized = applyCompletionToTail(nextTail, event, timestamp, source);
     if (finalized !== nextTail) {
       nextTail = finalized;
       changedTail = true;
@@ -1002,21 +1036,17 @@ export function applyStreamEvent(params: {
     flushHead();
   }
 
-  if (incomingKind === "assistant_message" && nextHead.length === 0) {
-    const tailAssistant = nextTail.at(-1);
-    const incomingMessageId =
-      event.type === "timeline" && event.item.type === "assistant_message"
-        ? event.item.messageId
-        : undefined;
-    const shouldContinueTailAssistant =
-      tailAssistant?.kind === "assistant_message" &&
-      (incomingMessageId === undefined || tailAssistant.messageId === incomingMessageId);
-    if (shouldContinueTailAssistant) {
-      nextTail = nextTail.slice(0, -1);
-      nextHead = [tailAssistant];
-      changedTail = true;
-      changedHead = true;
-    }
+  const tailAssistant = getTailAssistantToResume({
+    incomingKind,
+    event,
+    nextHead,
+    tailAssistant: nextTail.at(-1),
+  });
+  if (tailAssistant) {
+    nextTail = nextTail.slice(0, -1);
+    nextHead = [tailAssistant];
+    changedTail = true;
+    changedHead = true;
   }
 
   // For streamable kinds, apply to head

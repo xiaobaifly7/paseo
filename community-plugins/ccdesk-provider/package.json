@@ -1,0 +1,18 @@
+{
+  "name": "paseo-ccdesk-candidate",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/gate.test.mjs test/provider.test.mjs test/service.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "8.20.0"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.15.0",
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3"
+  }
+}

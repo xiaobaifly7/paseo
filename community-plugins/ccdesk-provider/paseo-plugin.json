@@ -1,0 +1,16 @@
+{
+  "id": "ccdesk",
+  "name": "CC Desk Provider",
+  "description": "Connect Paseo to a local CC Desk Tunnel service.",
+  "requirements": {
+    "paseo": ">=0.15.0"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--ignore-scripts"
+    ]
+  ]
+}
